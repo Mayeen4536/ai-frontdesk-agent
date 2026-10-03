@@ -1,6 +1,6 @@
 # Architecture
 
-Status: initial design, pre-implementation. This document describes intent and will change as the system is built. Significant changes should be recorded here with the reason.
+Status: initial design. Phase 1 has started: a FastAPI skeleton exists (`/health`, `/chat`, `/lead`) with no LLM, database or auth. This document describes intent and will change as the system is built. Significant changes should be recorded here with the reason.
 
 ## 1. Engineering principles
 
@@ -90,6 +90,8 @@ Responsibilities:
 - Return the response.
 
 The API layer contains no LLM logic and no business rules beyond request handling. Keeping it thin means the orchestrator and tools can be tested without HTTP.
+
+Current state (Phase 1): `app/main.py` builds the app and registers one router per endpoint in `app/api`. Request and response contracts, including input validation rules (blank messages, a lead needing a phone or email), are Pydantic models in `app/schemas`, so routes stay a few lines long and FastAPI returns 422 on invalid input before a route runs.
 
 ### 3.3 AI Orchestrator
 

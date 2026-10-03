@@ -2,7 +2,7 @@
 
 A multi-tenant AI front-office employee for appointment-based service businesses. The first vertical is dental clinics.
 
-**Status: Architecture phase.** No application code exists yet. This repository currently holds the structure and the design documents.
+**Status: Phase 1 started.** A minimal FastAPI skeleton exists (`/health`, `/chat`, `/lead`). There is no LLM, database or authentication yet. See the design documents for the full plan.
 
 ---
 
@@ -76,7 +76,7 @@ Availability checks, validation, authorization, tenant isolation and database wr
 
 ## 5. Planned capabilities
 
-Nothing below is built yet. Listed roughly in delivery order.
+Only the FastAPI skeleton exists so far; everything below is still to build. Listed roughly in delivery order.
 
 - Chat endpoint with conversation state
 - Tenant-scoped knowledge base with retrieval-augmented answers (RAG) for stable business information
@@ -136,8 +136,8 @@ Chosen to stay small. Nothing is added until a feature needs it.
 
 | Phase | Goal | Status |
 |---|---|---|
-| 0. Architecture | Repo structure, README, architecture document | **Current** |
-| 1. Foundation | FastAPI skeleton, config, PostgreSQL via Docker, health check, pytest, CI | Planned |
+| 0. Architecture | Repo structure, README, architecture document | Done |
+| 1. Foundation | FastAPI skeleton, config, PostgreSQL via Docker, health check, pytest, CI | **In progress** (FastAPI skeleton, health check and pytest done) |
 | 2. Data model | Tenants, appointments, leads, conversations, audit log, migrations | Planned |
 | 3. Orchestrator v1 | LLM call, structured outputs, conversation state, tool-calling loop | Planned |
 | 4. Tools | Appointment tool, lead tool, human escalation | Planned |
@@ -149,18 +149,32 @@ Chosen to stay small. Nothing is added until a feature needs it.
 
 ## 10. Current project status
 
-**Architecture phase.**
+**Phase 1 (Foundation) in progress.**
 
 - Repository structure defined
 - README and architecture document written, including the seven engineering principles
 - Learning journal started in `docs/learning` (written by the learner, not generated)
-- No application code, dependencies, Docker setup or CI workflows yet
+- FastAPI skeleton with `GET /health`, `POST /chat` (acknowledges only) and `POST /lead` (validates only, no storage)
+- pytest suite for the three endpoints
+- No LLM, database, Docker setup, CI or authentication yet
+
+### Running the backend
+
+```
+cd backend
+python -m venv .venv
+.venv\Scripts\activate        # Windows; use source .venv/bin/activate elsewhere
+pip install -e ".[dev]"
+uvicorn app.main:app --reload   # http://localhost:8000/docs
+pytest
+```
 
 ## Repository layout
 
 ```
 backend/
   app/
+    main.py         FastAPI app factory
     api/            HTTP layer (FastAPI routes)
     auth/           Authentication and authorization
     orchestrator/   LLM interaction and agent loop
@@ -169,6 +183,7 @@ backend/
     schemas/        Typed schemas for structured outputs and tools
     db/             Models, sessions, migrations
     core/           Config, logging, shared utilities
+  pyproject.toml    Python project and dependencies
   tests/            pytest suite (deterministic)
   evals/            AI evaluation suite (probabilistic behavior)
 frontend/           React / Next.js app (later)
