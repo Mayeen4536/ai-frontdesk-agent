@@ -31,3 +31,11 @@ pgdata/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Private local notes
+private/
+notes-private/
+*.private.md
+
+# Personal learning notes
+docs/learning/
