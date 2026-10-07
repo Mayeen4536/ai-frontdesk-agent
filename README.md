@@ -2,7 +2,7 @@
 
 A multi-tenant AI front-office employee for appointment-based service businesses. The first vertical is dental clinics.
 
-**Status: Phase 1 started.** A minimal FastAPI skeleton exists (`/health`, `/chat`, `/lead`). There is no LLM, database or authentication yet. See the design documents for the full plan.
+**Status: Phase 1 in progress.** A typed FastAPI backend exists (`/health`, `/chat`, `/lead`) with a service layer and a temporary deterministic message classifier returning structured output. There is no LLM, database or authentication yet. See the design documents for the full plan.
 
 ---
 
@@ -76,7 +76,7 @@ Availability checks, validation, authorization, tenant isolation and database wr
 
 ## 5. Planned capabilities
 
-Only the FastAPI skeleton exists so far; everything below is still to build. Listed roughly in delivery order.
+Only the FastAPI foundation and a deterministic structured-output demo exist so far; everything below is still to build. Listed roughly in delivery order.
 
 - Chat endpoint with conversation state
 - Tenant-scoped knowledge base with retrieval-augmented answers (RAG) for stable business information
@@ -91,9 +91,21 @@ Only the FastAPI skeleton exists so far; everything below is still to build. Lis
 - Additional channels (voice, SMS) and additional verticals
 - MCP server exposure of tools
 
-## 6. Planned technology stack
+## 6. Technology
 
-Chosen to stay small. Nothing is added until a feature needs it.
+### Implemented today
+
+| Area | Technology | Where it is used |
+|---|---|---|
+| Language | Python 3.11+ | Whole backend, fully type-hinted |
+| API framework | FastAPI | `GET /health`, `POST /chat`, `POST /lead`, auto-generated OpenAPI and Swagger UI |
+| Validation and schemas | Pydantic v2 | Request models, explicit response models, custom validators |
+| Testing | pytest, FastAPI `TestClient` | Deterministic endpoint and service tests in `backend/tests` |
+| Architecture | Thin routes and a service layer | Routes delegate to `app/services`; no logic in the HTTP layer |
+
+### Planned (not implemented)
+
+Chosen to stay small. Nothing is added until a feature needs it. None of the items below exist in the codebase yet.
 
 | Area | Choice |
 |---|---|
@@ -137,7 +149,7 @@ Chosen to stay small. Nothing is added until a feature needs it.
 | Phase | Goal | Status |
 |---|---|---|
 | 0. Architecture | Repo structure, README, architecture document | Done |
-| 1. Foundation | FastAPI skeleton, config, PostgreSQL via Docker, health check, pytest, CI | **In progress** (FastAPI skeleton, health check and pytest done) |
+| 1. Foundation | FastAPI skeleton, config, PostgreSQL via Docker, health check, pytest, CI | **In progress** (FastAPI, Pydantic contracts, service layer, structured intent output and pytest done) |
 | 2. Data model | Tenants, appointments, leads, conversations, audit log, migrations | Planned |
 | 3. Orchestrator v1 | LLM call, structured outputs, conversation state, tool-calling loop | Planned |
 | 4. Tools | Appointment tool, lead tool, human escalation | Planned |
@@ -154,9 +166,48 @@ Chosen to stay small. Nothing is added until a feature needs it.
 - Repository structure defined
 - README and architecture document written, including the seven engineering principles
 - Learning journal started in `docs/learning` (written by the learner, not generated)
-- FastAPI skeleton with `GET /health`, `POST /chat` (acknowledges only) and `POST /lead` (validates only, no storage)
-- pytest suite for the three endpoints
+- FastAPI app with `GET /health`, `POST /chat` and `POST /lead` (validates only, no storage)
+- `POST /chat` validates the request, classifies the message through a service and returns structured output
+- Classification is **temporary deterministic keyword logic, not AI**. It exists to establish the architecture and the output contract that an LLM-backed classifier will later fulfil
+- pytest suite (22 tests) covering endpoints and the classifier
 - No LLM, database, Docker setup, CI or authentication yet
+
+### API at a glance
+
+| Endpoint | Purpose | Success | Invalid input |
+|---|---|---|---|
+| `GET /health` | Liveness check | 200 `{"status": "ok"}` | n/a |
+| `POST /chat` | Validate a message, return it with a structured intent | 200 `ChatResponse` | 422 (empty or whitespace message) |
+| `POST /lead` | Validate a prospective-patient lead (no storage yet) | 200 `LeadResponse` | 422 (missing name/reason, or no phone and no email) |
+
+Example `POST /chat`:
+
+```json
+// request
+{"message": "Please book a cleaning tomorrow afternoon"}
+
+// response
+{
+  "message": "Please book a cleaning tomorrow afternoon",
+  "status": "received",
+  "classification": {
+    "intent": "book_appointment",
+    "reason": "cleaning",
+    "requested_date": "tomorrow",
+    "time_preference": "afternoon"
+  }
+}
+```
+
+### Engineering concepts demonstrated
+
+- **HTTP API design**: correct verbs (GET for reads, POST for submissions), meaningful status codes (200 and 422), a consistent JSON contract.
+- **API contracts**: explicit request and response models on every route (`response_model`), so the OpenAPI schema at `/docs` is the contract and cannot silently drift from the code.
+- **Structured data validation**: Pydantic models reject malformed input at the boundary (blank messages, missing lead fields, leads with no contact method) before any logic runs.
+- **Structured output**: the classifier returns a typed `IntentResult` (`intent` constrained to a fixed set of values, plus optional `reason`, `requested_date`, `time_preference`) instead of free text. This is the same shape an LLM will be required to produce later, validated the same way.
+- **Thin routes, service layer**: routes handle HTTP only; classification lives in `app/services/classifier.py` behind a single function, so the implementation can change without touching the route or the contract.
+- **Deterministic testing**: unit tests for the service and API tests through `TestClient`, all repeatable with no network or model calls.
+- **Honest scoping**: placeholder logic is labelled as such in code and docs, and no capability is claimed before it exists.
 
 ### Running the backend
 
@@ -175,12 +226,13 @@ pytest
 backend/
   app/
     main.py         FastAPI app factory
-    api/            HTTP layer (FastAPI routes)
+    api/            HTTP layer (thin FastAPI routes)
+    services/       Business logic (temporary deterministic classifier)
     auth/           Authentication and authorization
     orchestrator/   LLM interaction and agent loop
     tools/          Appointment, lead and escalation tools
     rag/            Ingestion and retrieval
-    schemas/        Typed schemas for structured outputs and tools
+    schemas/        Pydantic request, response and structured-output models
     db/             Models, sessions, migrations
     core/           Config, logging, shared utilities
   pyproject.toml    Python project and dependencies

@@ -4,6 +4,8 @@ from typing import Literal
 
 from pydantic import BaseModel, field_validator
 
+from app.schemas.intent import IntentResult
+
 
 class ChatRequest(BaseModel):
     message: str
@@ -20,3 +22,4 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     message: str
     status: Literal["received"] = "received"
+    classification: IntentResult
