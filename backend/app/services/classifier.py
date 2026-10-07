@@ -1,10 +1,9 @@
-"""Temporary deterministic message classifier.
+"""Deterministic keyword classifier. NOT AI, and no longer used by the chat route.
 
-This is NOT AI. It is plain keyword matching that exists only to demonstrate
-the architecture: route -> service -> typed result. It is deliberately naive
-and will be replaced or complemented by an LLM-backed classifier. Callers
-depend only on `classify_message` and `IntentResult`, so that swap should not
-change the route or the API contract.
+Kept as a free, instant, reproducible baseline: tests use it to pin the expected
+`IntentResult` shape, and it can be compared against the LLM extractor later. It is
+deliberately naive. It is not a silent fallback: if the LLM fails, the API reports
+the failure instead of guessing.
 """
 
 import re

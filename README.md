@@ -2,7 +2,7 @@
 
 A multi-tenant AI front-office employee for appointment-based service businesses. The first vertical is dental clinics.
 
-**Status: Phase 1 in progress.** A typed FastAPI backend exists (`/health`, `/chat`, `/lead`) with a service layer and a temporary deterministic message classifier returning structured output. There is no LLM, database or authentication yet. See the design documents for the full plan.
+**Status: Phase 1 in progress.** A typed FastAPI backend exists (`/health`, `/chat`, `/lead`) with a service layer and an LLM-backed intent extractor (Anthropic Claude, schema-constrained structured output). There is no database, retrieval, tool execution or authentication yet. See the design documents for the full plan.
 
 ---
 
@@ -100,24 +100,28 @@ Only the FastAPI foundation and a deterministic structured-output demo exist so 
 | Language | Python 3.11+ | Whole backend, fully type-hinted |
 | API framework | FastAPI | `GET /health`, `POST /chat`, `POST /lead`, auto-generated OpenAPI and Swagger UI |
 | Validation and schemas | Pydantic v2 | Request models, explicit response models, custom validators |
-| Testing | pytest, FastAPI `TestClient` | Deterministic endpoint and service tests in `backend/tests` |
+| LLM provider | Anthropic Claude (`claude-haiku-4-5`) via the official `anthropic` Python SDK | Intent extraction for `POST /chat` |
+| Structured LLM output | SDK `messages.parse` with a Pydantic schema | Model output is schema-constrained, then validated into `IntentResult` |
+| Async external API integration | `AsyncAnthropic`, `async def` route | The model call does not block the event loop |
+| Configuration | Environment variables (`.env` git-ignored, `.env.example` committed) | API key and model settings never enter the repo |
+| Testing | pytest, anyio, FastAPI `TestClient`, injected fakes | Fast deterministic tests with no network or paid calls; optional live test kept separate |
 | Architecture | Thin routes and a service layer | Routes delegate to `app/services`; no logic in the HTTP layer |
 
 ### Planned (not implemented)
 
-Chosen to stay small. Nothing is added until a feature needs it. None of the items below exist in the codebase yet.
+Chosen to stay small. Nothing is added until a feature needs it. Rows marked *implemented* are covered above; everything else does **not** exist in the codebase yet.
 
 | Area | Choice |
 |---|---|
-| Language | Python |
-| API | FastAPI |
+| Language | Python (implemented) |
+| API | FastAPI (implemented) |
 | Database | PostgreSQL |
 | Vector search | pgvector (inside PostgreSQL, no separate vector store) |
-| LLM integration | Direct provider SDK calls behind a thin internal interface |
+| LLM integration | Direct provider SDK calls behind a thin internal interface (implemented for intent extraction) |
 | Orchestration | Plain Python first; a framework only if a real need appears |
-| Structured outputs | Pydantic schemas validating all model output the app acts on |
+| Structured outputs | Pydantic schemas validating all model output the app acts on (implemented for intent extraction) |
 | Tool calling | Provider-native tool calling with typed schemas |
-| Testing | pytest |
+| Testing | pytest (implemented) |
 | Evaluations | Custom eval harness in `backend/evals`, run in CI |
 | Containers | Docker |
 | CI | GitHub Actions |
@@ -149,7 +153,7 @@ Chosen to stay small. Nothing is added until a feature needs it. None of the ite
 | Phase | Goal | Status |
 |---|---|---|
 | 0. Architecture | Repo structure, README, architecture document | Done |
-| 1. Foundation | FastAPI skeleton, config, PostgreSQL via Docker, health check, pytest, CI | **In progress** (FastAPI, Pydantic contracts, service layer, structured intent output and pytest done) |
+| 1. Foundation | FastAPI skeleton, config, PostgreSQL via Docker, health check, pytest, CI | **In progress** (FastAPI, Pydantic contracts, service layer, env config, first LLM integration with structured intent output, pytest done; PostgreSQL, Docker, CI remaining) |
 | 2. Data model | Tenants, appointments, leads, conversations, audit log, migrations | Planned |
 | 3. Orchestrator v1 | LLM call, structured outputs, conversation state, tool-calling loop | Planned |
 | 4. Tools | Appointment tool, lead tool, human escalation | Planned |
@@ -167,47 +171,66 @@ Chosen to stay small. Nothing is added until a feature needs it. None of the ite
 - README and architecture document written, including the seven engineering principles
 - Learning journal started in `docs/learning` (written by the learner, not generated)
 - FastAPI app with `GET /health`, `POST /chat` and `POST /lead` (validates only, no storage)
-- `POST /chat` validates the request, classifies the message through a service and returns structured output
-- Classification is **temporary deterministic keyword logic, not AI**. It exists to establish the architecture and the output contract that an LLM-backed classifier will later fulfil
-- pytest suite (22 tests) covering endpoints and the classifier
-- No LLM, database, Docker setup, CI or authentication yet
+- `POST /chat` validates the request, asks an LLM to extract a structured intent, and returns it
+- The model only classifies. It cannot book, check availability, state policies or diagnose; the system prompt and the schema both keep it to that
+- The deterministic keyword classifier is kept as a test baseline. It is not a silent fallback: if the AI fails, the API says so
+- pytest suite (31 deterministic tests, no network), plus one optional live test excluded from the default run
+- No database, RAG, tool execution, Docker setup, CI or authentication yet
 
 ### API at a glance
 
 | Endpoint | Purpose | Success | Invalid input |
 |---|---|---|---|
 | `GET /health` | Liveness check | 200 `{"status": "ok"}` | n/a |
-| `POST /chat` | Validate a message, return it with a structured intent | 200 `ChatResponse` | 422 (empty or whitespace message) |
+| `POST /chat` | Validate a message, return it with an LLM-extracted structured intent | 200 `ChatResponse` | 422 (empty or whitespace message); 502 (AI provider failed or returned invalid output); 503 (AI not configured) |
 | `POST /lead` | Validate a prospective-patient lead (no storage yet) | 200 `LeadResponse` | 422 (missing name/reason, or no phone and no email) |
 
 Example `POST /chat`:
 
 ```json
 // request
-{"message": "Please book a cleaning tomorrow afternoon"}
+{"message": "My tooth broke and I want to come tomorrow afternoon."}
 
-// response
+// response (illustrative; the exact wording of reason comes from the model)
 {
-  "message": "Please book a cleaning tomorrow afternoon",
+  "message": "My tooth broke and I want to come tomorrow afternoon.",
   "status": "received",
   "classification": {
     "intent": "book_appointment",
-    "reason": "cleaning",
+    "reason": "broken tooth",
     "requested_date": "tomorrow",
     "time_preference": "afternoon"
   }
 }
 ```
 
+### Architecture of a chat request
+
+```
+POST /chat
+  -> ChatRequest validation (Pydantic, 422 on blank input)
+  -> route (thin; maps AI failures to 502/503)
+  -> app/services/intent_service.py
+  -> IntentExtractor interface (app/llm/base.py)
+  -> AnthropicIntentExtractor (the only provider-specific file)
+  -> schema-constrained model output, validated as IntentResult
+  -> ChatResponse
+```
+
 ### Engineering concepts demonstrated
 
-- **HTTP API design**: correct verbs (GET for reads, POST for submissions), meaningful status codes (200 and 422), a consistent JSON contract.
-- **API contracts**: explicit request and response models on every route (`response_model`), so the OpenAPI schema at `/docs` is the contract and cannot silently drift from the code.
-- **Structured data validation**: Pydantic models reject malformed input at the boundary (blank messages, missing lead fields, leads with no contact method) before any logic runs.
-- **Structured output**: the classifier returns a typed `IntentResult` (`intent` constrained to a fixed set of values, plus optional `reason`, `requested_date`, `time_preference`) instead of free text. This is the same shape an LLM will be required to produce later, validated the same way.
-- **Thin routes, service layer**: routes handle HTTP only; classification lives in `app/services/classifier.py` behind a single function, so the implementation can change without touching the route or the contract.
-- **Deterministic testing**: unit tests for the service and API tests through `TestClient`, all repeatable with no network or model calls.
-- **Honest scoping**: placeholder logic is labelled as such in code and docs, and no capability is claimed before it exists.
+- **LLM API integration**: real calls to Anthropic Claude through the official async SDK, with a timeout, a small token budget and temperature 0 for a repeatable classification task.
+- **Schema-constrained structured output**: the model is asked for output matching the `IntentResult` JSON schema (`intent` limited to a fixed set, plus optional `reason`, `requested_date`, `time_preference`) rather than free text that has to be parsed.
+- **Probabilistic AI behind deterministic validation**: the model proposes; Pydantic validates. Invalid, missing or refused output becomes a typed error, never a guessed result.
+- **Honest failure behaviour**: the route returns 502 or 503 when the AI is unavailable or invalid, never a fake success, and does not leak provider error text. A silent keyword fallback was rejected on purpose.
+- **Narrow model responsibility**: the prompt restricts the model to classification, so it cannot claim a booking, invent availability or policy, or give medical advice. Message text is treated as untrusted input.
+- **Provider abstraction**: routes and services depend on an `IntentExtractor` protocol injected with FastAPI dependencies. Swapping provider means writing one class.
+- **Async I/O**: only the external model call is async (`AsyncAnthropic`, `async def` route); unrelated code stays synchronous.
+- **Separation of concerns**: HTTP (routes), application logic (services), provider integration (`app/llm`), contracts (`app/schemas`) and configuration (`app/core`) are separate modules.
+- **Mocked external-service testing**: success, provider failure, malformed output and missing configuration are tested with injected fakes, so the suite is fast, free and deterministic. A live test exists but is excluded by default (`pytest -m live`).
+- **Environment-based secret management**: the API key comes from environment variables; `.env` is git-ignored and `.env.example` holds placeholders only.
+- **HTTP API design and contracts**: correct verbs and status codes (200, 422, 502, 503), explicit request and response models, and an OpenAPI schema at `/docs` that matches the code.
+- **Structured data validation**: Pydantic rejects malformed input at the boundary (blank messages, incomplete leads) before any logic or model call runs.
 
 ### Running the backend
 
@@ -216,9 +239,13 @@ cd backend
 python -m venv .venv
 .venv\Scripts\activate        # Windows; use source .venv/bin/activate elsewhere
 pip install -e ".[dev]"
-uvicorn app.main:app --reload   # http://localhost:8000/docs
-pytest
+copy .env.example .env          # then set ANTHROPIC_API_KEY (use cp on macOS/Linux)
+uvicorn app.main:app --reload --env-file .env   # http://localhost:8000/docs
+pytest                          # deterministic, mocked, no API key needed
+pytest -m live tests/live       # optional: one real model call, needs a key
 ```
+
+Without `ANTHROPIC_API_KEY`, the app starts and `/health` works, but `POST /chat` returns 503.
 
 ## Repository layout
 
@@ -227,14 +254,15 @@ backend/
   app/
     main.py         FastAPI app factory
     api/            HTTP layer (thin FastAPI routes)
-    services/       Business logic (temporary deterministic classifier)
+    services/       Application logic (intent service, deterministic baseline classifier)
+    llm/            Provider-neutral LLM interface, prompts, Anthropic implementation
     auth/           Authentication and authorization
     orchestrator/   LLM interaction and agent loop
     tools/          Appointment, lead and escalation tools
     rag/            Ingestion and retrieval
     schemas/        Pydantic request, response and structured-output models
     db/             Models, sessions, migrations
-    core/           Config, logging, shared utilities
+    core/           Settings from environment variables (logging later)
   pyproject.toml    Python project and dependencies
   tests/            pytest suite (deterministic)
   evals/            AI evaluation suite (probabilistic behavior)
