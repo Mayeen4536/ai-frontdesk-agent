@@ -2,7 +2,7 @@
 
 A multi-tenant AI front-office employee for appointment-based service businesses. The first vertical is dental clinics.
 
-**Status: Phase 1 in progress.** A typed FastAPI backend exists (`/health`, `/chat`, `/lead`) with a service layer and an LLM-backed intent extractor (Anthropic Claude, schema-constrained structured output). There is no database, retrieval, tool execution or authentication yet. See the design documents for the full plan.
+**Status: Phase 1 in progress.** A typed FastAPI backend exists (`/health`, `/chat`, `/lead`) with a service layer and an LLM-backed intent extractor (Anthropic Claude, schema-constrained structured output). Leads are persisted in PostgreSQL. There is no retrieval, tool execution or authentication yet. See the design documents for the full plan.
 
 ---
 
@@ -105,7 +105,9 @@ Only the FastAPI foundation and a deterministic structured-output demo exist so 
 | Async external API integration | `AsyncAnthropic`, `async def` route | The model call does not block the event loop |
 | Configuration | Environment variables (`.env` git-ignored, `.env.example` committed) | API key and model settings never enter the repo |
 | Testing | pytest, anyio, FastAPI `TestClient`, injected fakes | Fast deterministic tests with no network or paid calls; optional live test kept separate |
-| Architecture | Thin routes and a service layer | Routes delegate to `app/services`; no logic in the HTTP layer |
+| Architecture | Thin routes, service layer, repository layer | Routes delegate to `app/services`, which persist through `app/repositories`; no SQL in the HTTP layer |
+| Database | PostgreSQL | `leads` table; `POST /lead` stores real rows |
+| ORM and driver | SQLAlchemy 2.0 (sync ORM) with psycopg 3 | Typed models, per-request sessions, explicit commit and rollback |
 
 ### Planned (not implemented)
 
@@ -115,7 +117,7 @@ Chosen to stay small. Nothing is added until a feature needs it. Rows marked *im
 |---|---|
 | Language | Python (implemented) |
 | API | FastAPI (implemented) |
-| Database | PostgreSQL |
+| Database | PostgreSQL (implemented for leads); Alembic migrations (planned) |
 | Vector search | pgvector (inside PostgreSQL, no separate vector store) |
 | LLM integration | Direct provider SDK calls behind a thin internal interface (implemented for intent extraction) |
 | Orchestration | Plain Python first; a framework only if a real need appears |
@@ -153,7 +155,7 @@ Chosen to stay small. Nothing is added until a feature needs it. Rows marked *im
 | Phase | Goal | Status |
 |---|---|---|
 | 0. Architecture | Repo structure, README, architecture document | Done |
-| 1. Foundation | FastAPI skeleton, config, PostgreSQL via Docker, health check, pytest, CI | **In progress** (FastAPI, Pydantic contracts, service layer, env config, first LLM integration with structured intent output, pytest done; PostgreSQL, Docker, CI remaining) |
+| 1. Foundation | FastAPI skeleton, config, PostgreSQL, health check, pytest, CI | **In progress** (FastAPI, Pydantic contracts, service layer, env config, first LLM integration with structured intent output, PostgreSQL lead persistence, pytest done; Alembic migrations, Docker, CI remaining) |
 | 2. Data model | Tenants, appointments, leads, conversations, audit log, migrations | Planned |
 | 3. Orchestrator v1 | LLM call, structured outputs, conversation state, tool-calling loop | Planned |
 | 4. Tools | Appointment tool, lead tool, human escalation | Planned |
@@ -170,12 +172,14 @@ Chosen to stay small. Nothing is added until a feature needs it. Rows marked *im
 - Repository structure defined
 - README and architecture document written, including the seven engineering principles
 - Learning journal started in `docs/learning` (written by the learner, not generated)
-- FastAPI app with `GET /health`, `POST /chat` and `POST /lead` (validates only, no storage)
+- FastAPI app with `GET /health`, `POST /chat` and `POST /lead`
+- `POST /lead` validates, saves the lead to PostgreSQL and returns the stored row (with its generated `id` and `created_at`). If the save fails it returns 503, never a fake success
 - `POST /chat` validates the request, asks an LLM to extract a structured intent, and returns it
 - The model only classifies. It cannot book, check availability, state policies or diagnose; the system prompt and the schema both keep it to that
 - The deterministic keyword classifier is kept as a test baseline. It is not a silent fallback: if the AI fails, the API says so
-- pytest suite (31 deterministic tests, no network), plus one optional live test excluded from the default run
-- No database, RAG, tool execution, Docker setup, CI or authentication yet
+- pytest suite (36 deterministic tests, no network, no PostgreSQL needed), plus one optional live test excluded from the default run
+- **Implemented:** PostgreSQL persistence for leads, FastAPI, Pydantic, LLM intent extraction
+- **Planned, not implemented:** schema migrations (Alembic), RAG and pgvector, tool execution, orchestration, Docker, CI, authentication, frontend
 
 ### API at a glance
 
@@ -183,7 +187,7 @@ Chosen to stay small. Nothing is added until a feature needs it. Rows marked *im
 |---|---|---|---|
 | `GET /health` | Liveness check | 200 `{"status": "ok"}` | n/a |
 | `POST /chat` | Validate a message, return it with an LLM-extracted structured intent | 200 `ChatResponse` | 422 (empty or whitespace message); 502 (AI provider failed or returned invalid output); 503 (AI not configured) |
-| `POST /lead` | Validate a prospective-patient lead (no storage yet) | 200 `LeadResponse` | 422 (missing name/reason, or no phone and no email) |
+| `POST /lead` | Validate and store a prospective-patient lead; returns the saved row | 201 `LeadResponse` (`id`, `name`, `phone`, `email`, `reason`, `created_at`) | 422 (missing name/reason, or no phone and no email); 503 (database unavailable or not configured) |
 
 Example `POST /chat`:
 
@@ -217,6 +221,35 @@ POST /chat
   -> ChatResponse
 ```
 
+### Architecture of a lead request
+
+```
+POST /lead
+  -> LeadRequest validation (Pydantic; 422 on missing name/reason or no phone/email)
+  -> route (thin; maps persistence failure to 503)
+  -> app/services/lead_service.py
+  -> LeadRepository (app/repositories; the only code that touches the table)
+  -> SQLAlchemy session -> PostgreSQL (commit, or rollback on error)
+  -> LeadResponse built from the stored row, HTTP 201
+```
+
+### Database schema
+
+`leads` (model in `app/db/models.py`):
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | integer | primary key, generated by the database |
+| `name` | varchar(200) | required |
+| `phone` | varchar(50) | nullable |
+| `email` | varchar(320) | nullable |
+| `reason` | text | required |
+| `created_at` | timestamptz | set by the database (`now()`) |
+
+"At least one of phone or email" is enforced in the API validation layer. It is not yet a database CHECK constraint.
+
+Schema setup today is a small script (`python -m app.db.init_db`) that creates missing tables. It cannot alter existing tables, so **Alembic migrations are the next database requirement** and will be added before the first schema change.
+
 ### Engineering concepts demonstrated
 
 - **LLM API integration**: real calls to Anthropic Claude through the official async SDK, with a timeout, a small token budget and temperature 0 for a repeatable classification task.
@@ -231,6 +264,12 @@ POST /chat
 - **Environment-based secret management**: the API key comes from environment variables; `.env` is git-ignored and `.env.example` holds placeholders only.
 - **HTTP API design and contracts**: correct verbs and status codes (200, 422, 502, 503), explicit request and response models, and an OpenAPI schema at `/docs` that matches the code.
 - **Structured data validation**: Pydantic rejects malformed input at the boundary (blank messages, incomplete leads) before any logic or model call runs.
+- **Relational data modeling and persistence**: leads are stored in a PostgreSQL table with a database-generated primary key, nullable contact columns and a server-side timestamp.
+- **Database boundaries**: route, service and repository are separate; only the repository knows about SQL or sessions.
+- **Transactions**: each lead insert is one transaction, committed explicitly and rolled back on any database error.
+- **Failure-aware API behaviour**: success is reported only after the commit succeeds; otherwise 503 with a generic message, and logs record the error type but not the lead's personal data.
+- **Environment-based database configuration**: `DATABASE_URL` comes from the environment; the settings object hides it from `repr` so it cannot leak into logs.
+- **Deterministic database testing**: persistence tests run against in-memory SQLite with fake stores for failure injection, so they need no PostgreSQL server and never touch real data. LLM tests do not involve the database. Behaviour against PostgreSQL itself was verified manually.
 
 ### Running the backend
 
@@ -239,13 +278,16 @@ cd backend
 python -m venv .venv
 .venv\Scripts\activate        # Windows; use source .venv/bin/activate elsewhere
 pip install -e ".[dev]"
-copy .env.example .env          # then set ANTHROPIC_API_KEY (use cp on macOS/Linux)
+copy .env.example .env          # then set ANTHROPIC_API_KEY and DATABASE_URL (use cp on macOS/Linux)
+python -m app.db.init_db        # create the leads table in your PostgreSQL database
 uvicorn app.main:app --reload --env-file .env   # http://localhost:8000/docs
-pytest                          # deterministic, mocked, no API key needed
+pytest                          # deterministic, mocked, no API key or PostgreSQL needed
 pytest -m live tests/live       # optional: one real model call, needs a key
 ```
 
-Without `ANTHROPIC_API_KEY`, the app starts and `/health` works, but `POST /chat` returns 503.
+`init_db` reads `DATABASE_URL` from the environment, so load `.env` into your shell first or export the variable. You need a reachable PostgreSQL database; any local install works. On Windows, prefer `127.0.0.1` over `localhost` in the URL if connections are slow (IPv6 fallback).
+
+Without `ANTHROPIC_API_KEY`, `POST /chat` returns 503. Without `DATABASE_URL`, `POST /lead` returns 503. `/health` works either way.
 
 ## Repository layout
 
@@ -261,7 +303,8 @@ backend/
     tools/          Appointment, lead and escalation tools
     rag/            Ingestion and retrieval
     schemas/        Pydantic request, response and structured-output models
-    db/             Models, sessions, migrations
+    repositories/   Database access (lead repository)
+    db/             SQLAlchemy base, models, sessions, schema init script (migrations planned)
     core/           Settings from environment variables (logging later)
   pyproject.toml    Python project and dependencies
   tests/            pytest suite (deterministic)

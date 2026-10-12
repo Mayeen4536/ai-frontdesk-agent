@@ -1,8 +1,9 @@
 """Request and response contracts for the lead endpoint."""
 
-from typing import Literal, Self
+from datetime import datetime
+from typing import Self
 
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 
 def _strip(value: str) -> str:
@@ -40,5 +41,14 @@ class LeadRequest(BaseModel):
         return self
 
 
-class LeadResponse(LeadRequest):
-    status: Literal["accepted"] = "accepted"
+class LeadResponse(BaseModel):
+    """The saved record, as stored."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    phone: str | None
+    email: str | None
+    reason: str
+    created_at: datetime
